@@ -1,24 +1,39 @@
+#@pyrolyze
 """GRIP-backed reactive hooks for PyRolyze plain-call components."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, TypeVar, cast
 
-from grip_py import Drip, GripContext, GripContextLike, Grok
-from pyrolyze.runtime import AppContextKey, ExternalStoreRef, PlainCallRuntimeContext
+from grip_py import Drip, GripContext, GripContextLike, Grok, GripRegistry, Grip
+from pyrolyze.runtime import (AppContextKey, ExternalStoreRef, PlainCallRuntimeContext,
+                              PyrolyzeComponent, app_context_override, use_app_context,
+                              pyrolyze)
 
 
 T = TypeVar("T")
 
+GRIP_DEFAULT_REGISTRY = GripRegistry()
+GRIP_DEFAULT_GROK = Grok(registry=GRIP_DEFAULT_REGISTRY)
+
+def define_grip[T](name: str, default: T) -> Grip[T]:
+    return GRIP_DEFAULT_REGISTRY.add(name, default)
 
 @dataclass(slots=True)
 class GripPyrolyzeSession:
-    grok: Grok
-    main_home_context: GripContext
-    main_presentation_context: GripContext
-    host_app: object | None = None
+    grok: Grok = field(default_factory=lambda: GRIP_DEFAULT_GROK)
+    main_presentation_context: GripContext = field(
+        default_factory=lambda: GRIP_DEFAULT_GROK.main_presentation_context)
 
+def _missing_ambient_grip_context(_host_app: object | None) -> GripContextLike:
+    raise LookupError("no authored ambient grip context is available")
+
+GRIP_LOCAL_CONTEXT = AppContextKey(
+    debug_name="grip_pyrolyze.local_context",
+    factory=_missing_ambient_grip_context,
+    close=None,
+)
 
 def _missing_session(_host_app: object | None) -> GripPyrolyzeSession:
     raise RuntimeError("grip-pyrolyze session is not configured")
@@ -39,6 +54,17 @@ GRIP_CONTEXT_KEY = AppContextKey(
     factory=_missing_ambient_grip_context,
     close=None,
 )
+
+@pyrolyze
+def push_grip_context(
+    context_name: str,
+    func: PyrolyzeComponent,
+    **kwargs,
+) -> None:
+    grip_ctx = use_app_context(GRIP_LOCAL_CONTEXT)
+    next_ctx = grip_ctx.make_or_find_child(context_name)
+    with app_context_override[GRIP_LOCAL_CONTEXT](next_ctx):
+        func(**kwargs)
 
 
 def use_grip(
