@@ -10,13 +10,20 @@ authors = [
 ]
 description = "GRIP integration and helpers for PyRolyze."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: GNU Lesser General Public License v2 or later (LGPLv2+)",
     "Operating System :: OS Independent",
 ]
-dependencies = []
+dependencies = [
+  "grip-py",
+  "pyrolyze",
+]
+
+[tool.uv.sources]
+grip-py = { path = "../grip-py", editable = true }
+pyrolyze = { path = "../pyrolyze", editable = true }
 
 [project.urls]
 Homepage = "https://github.com/owebeeone/grip-pyrolyze"

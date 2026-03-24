@@ -7,6 +7,10 @@ Python package for GRIP integration with [PyRolyze](https://github.com/owebeeone
 - **Build backend:** hatchling
 - **License:** LGPL-2.1-or-later (see `LICENSE`)
 
+## `use_grip`
+
+`grip_pyrolyze.core.use_grip` mirrors `pyrolyze.hooks.use_state` (same `PlainCallRuntimeContext` signature) but stores each value in a `grip-py` atom tap registered on a per–`RenderContext` GRIP session (`AppContextKey`). PyRolyze examples can `from grip_pyrolyze import use_grip` and compile like `use_state`.
+
 ## Local development
 
 ```bash
