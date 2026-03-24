@@ -1,39 +1,51 @@
 #@pyrolyze
-"""GRIP-backed reactive hooks for PyRolyze plain-call components."""
+"""GRIP-backed reactive hooks and context helpers for PyRolyze."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Callable, TypeVar, cast
 
-from grip_py import Drip, GripContext, GripContextLike, Grok, GripRegistry, Grip
-from pyrolyze.runtime import (AppContextKey, ExternalStoreRef, PlainCallRuntimeContext,
-                              PyrolyzeComponent, app_context_override, use_app_context,
-                              pyrolyze)
+from grip_py import Drip, Grip, GripContext, GripContextLike, GripRegistry, Grok
+from pyrolyze.api import app_context_override, pyrolyze
+from pyrolyze.runtime import AppContextKey, ExternalStoreRef, PlainCallRuntimeContext
 
 
 T = TypeVar("T")
 
+
 GRIP_DEFAULT_REGISTRY = GripRegistry()
 GRIP_DEFAULT_GROK = Grok(registry=GRIP_DEFAULT_REGISTRY)
 
+
 def define_grip[T](name: str, default: T) -> Grip[T]:
+    """Register one grip on the default package registry.
+
+    Author code should make the grip type explicit or trivially deducible.
+    Preferred forms are:
+
+    ```python
+    COUNT: Grip[int] = define_grip("Count", 0)
+    CURRENT_TAB: Grip[Literal["clock", "calc"]] = define_grip("CurrentTab", "clock")
+    ```
+
+    Avoid definitions where the resulting grip type is ambiguous to readers or
+    tooling.
+    """
     return GRIP_DEFAULT_REGISTRY.add(name, default)
+
 
 @dataclass(slots=True)
 class GripPyrolyzeSession:
     grok: Grok = field(default_factory=lambda: GRIP_DEFAULT_GROK)
+    main_home_context: GripContext = field(
+        default_factory=lambda: GRIP_DEFAULT_GROK.main_home_context,
+    )
     main_presentation_context: GripContext = field(
-        default_factory=lambda: GRIP_DEFAULT_GROK.main_presentation_context)
+        default_factory=lambda: GRIP_DEFAULT_GROK.main_presentation_context,
+    )
+    host_app: object | None = None
 
-def _missing_ambient_grip_context(_host_app: object | None) -> GripContextLike:
-    raise LookupError("no authored ambient grip context is available")
-
-GRIP_LOCAL_CONTEXT = AppContextKey(
-    debug_name="grip_pyrolyze.local_context",
-    factory=_missing_ambient_grip_context,
-    close=None,
-)
 
 def _missing_session(_host_app: object | None) -> GripPyrolyzeSession:
     raise RuntimeError("grip-pyrolyze session is not configured")
@@ -55,14 +67,55 @@ GRIP_CONTEXT_KEY = AppContextKey(
     close=None,
 )
 
+# Alias kept for the naming used in the design discussion/docs.
+GRIP_LOCAL_CONTEXT = GRIP_CONTEXT_KEY
+
+
+def use_grip_app_context(
+    *,
+    ctx: GripContextLike | None = None,
+    __pyrolyze_ctx: PlainCallRuntimeContext = cast(Any, None),
+) -> GripContextLike:
+    if __pyrolyze_ctx is None:
+        raise RuntimeError("use_grip_app_context() requires a pyrolyze plain-call runtime context")
+    if ctx is not None:
+        return ctx
+    return _resolve_ambient_context(__pyrolyze_ctx)
+
+
+def use_grip_child_context(
+    context_name: str,
+    *,
+    ctx: GripContextLike | None = None,
+    priority: int = 0,
+    __pyrolyze_ctx: PlainCallRuntimeContext = cast(Any, None),
+) -> GripContext:
+    if __pyrolyze_ctx is None:
+        raise RuntimeError("use_grip_child_context() requires a pyrolyze plain-call runtime context")
+
+    parent_ctx = use_grip_app_context(ctx=ctx, __pyrolyze_ctx=__pyrolyze_ctx)
+    consumer_ctx = parent_ctx.get_grip_consumer_context()
+    cache = cast(
+        dict[tuple[int, str, int], GripContext],
+        __pyrolyze_ctx.get_or_init_local("grip_pyrolyze.child_contexts", dict),
+    )
+    cache_key = (id(consumer_ctx), context_name, priority)
+    existing = cache.get(cache_key)
+    if existing is not None:
+        return existing
+
+    child = consumer_ctx.create_child(priority=priority)
+    cache[cache_key] = child
+    return child
+
+
 @pyrolyze
 def push_grip_context(
     context_name: str,
-    func: PyrolyzeComponent,
-    **kwargs,
+    func: Callable[..., None],
+    **kwargs: Any,
 ) -> None:
-    grip_ctx = use_app_context(GRIP_LOCAL_CONTEXT)
-    next_ctx = grip_ctx.make_or_find_child(context_name)
+    next_ctx = use_grip_child_context(context_name)
     with app_context_override[GRIP_LOCAL_CONTEXT](next_ctx):
         func(**kwargs)
 
@@ -74,11 +127,11 @@ def use_grip(
     __pyrolyze_ctx: PlainCallRuntimeContext = cast(Any, None),
 ) -> ExternalStoreRef[T | None]:
     """Return a reactive external-store view for ``grip_key``."""
-    if __pyrolyze_ctx is None:
-        raise RuntimeError("use_grip() requires a pyrolyze plain-call runtime context")
-
     if ctx is not None:
         return cast(ExternalStoreRef[T | None], _resolve_explicit_context_ref(ctx, grip_key))
+
+    if __pyrolyze_ctx is None:
+        raise RuntimeError("use_grip() requires a pyrolyze plain-call runtime context")
 
     resolved_ctx = _resolve_ambient_context(__pyrolyze_ctx)
     return cast(ExternalStoreRef[T | None], _ref_from_grip_context(resolved_ctx, grip_key))
@@ -95,7 +148,7 @@ def _resolve_ambient_context(__pyrolyze_ctx: PlainCallRuntimeContext) -> GripCon
             raise TypeError("GRIP_CONTEXT_KEY must resolve to a GripContextLike value")
         return authored
 
-    session = __pyrolyze_ctx.get_app_context(GRIP_PYROLYZE_SESSION_KEY)
+    session = cast(GripPyrolyzeSession, __pyrolyze_ctx.get_app_context(GRIP_PYROLYZE_SESSION_KEY))
     return session.main_presentation_context
 
 
@@ -109,7 +162,11 @@ def _resolve_explicit_context_ref(
         return _coerce_lookup_payload(payload, extra_unsubscribe=_callable_attr(ctx, "unsubscribe"))
 
     if isinstance(ctx, GripContextLike):
-        return _ref_from_grip_context(ctx, grip_key, extra_unsubscribe=_callable_attr(ctx, "unsubscribe"))
+        return _ref_from_grip_context(
+            ctx,
+            grip_key,
+            extra_unsubscribe=_callable_attr(ctx, "unsubscribe"),
+        )
 
     raise TypeError("use_grip() explicit ctx must be a GripContextLike or expose lookup_grip(grip)")
 
@@ -159,7 +216,10 @@ def _coerce_lookup_payload(
         return _with_extra_unsubscribe(
             ExternalStoreRef(
                 identity=payload,
-                subscribe=cast(Callable[[Callable[[], None]], Callable[[], None]], payload.subscribe),
+                subscribe=cast(
+                    Callable[[Callable[[], None]], Callable[[], None]],
+                    payload.subscribe,
+                ),
                 get=cast(Callable[[], Any], payload.get),
             ),
             extra_unsubscribe,
@@ -241,7 +301,14 @@ def _chain_unsubscribe(
 
 __all__ = [
     "GRIP_CONTEXT_KEY",
+    "GRIP_DEFAULT_GROK",
+    "GRIP_DEFAULT_REGISTRY",
+    "GRIP_LOCAL_CONTEXT",
     "GRIP_PYROLYZE_SESSION_KEY",
     "GripPyrolyzeSession",
+    "define_grip",
+    "push_grip_context",
     "use_grip",
+    "use_grip_app_context",
+    "use_grip_child_context",
 ]
