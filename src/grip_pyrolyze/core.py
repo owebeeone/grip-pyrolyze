@@ -17,23 +17,9 @@ T = TypeVar("T")
 GRIP_DEFAULT_REGISTRY = GripRegistry()
 GRIP_DEFAULT_GROK = Grok(registry=GRIP_DEFAULT_REGISTRY)
 
+define_grip = GRIP_DEFAULT_REGISTRY.add
 
-def define_grip[T](name: str, default: T) -> Grip[T]:
-    """Register one grip on the default package registry.
-
-    Author code should make the grip type explicit or trivially deducible.
-    Preferred forms are:
-
-    ```python
-    COUNT: Grip[int] = define_grip("Count", 0)
-    CURRENT_TAB: Grip[Literal["clock", "calc"]] = define_grip("CurrentTab", "clock")
-    ```
-
-    Avoid definitions where the resulting grip type is ambiguous to readers or
-    tooling.
-    """
-    return GRIP_DEFAULT_REGISTRY.add(name, default)
-
+_NAMED_CHILD_CONTEXTS: dict[tuple[int, int, str, int], GripContext] = {}
 
 @dataclass(slots=True)
 class GripPyrolyzeSession:
@@ -90,22 +76,29 @@ def use_grip_child_context(
     priority: int = 0,
     __pyrolyze_ctx: PlainCallRuntimeContext = cast(Any, None),
 ) -> GripContext:
-    if __pyrolyze_ctx is None:
-        raise RuntimeError("use_grip_child_context() requires a pyrolyze plain-call runtime context")
+    if ctx is not None:
+        parent_ctx = ctx
+    else:
+        if __pyrolyze_ctx is None:
+            raise RuntimeError("use_grip_child_context() requires a pyrolyze plain-call runtime context")
+        parent_ctx = use_grip_app_context(__pyrolyze_ctx=__pyrolyze_ctx)
+    return _get_or_create_named_child_context(parent_ctx, context_name, priority=priority)
 
-    parent_ctx = use_grip_app_context(ctx=ctx, __pyrolyze_ctx=__pyrolyze_ctx)
+
+def _get_or_create_named_child_context(
+    parent_ctx: GripContextLike,
+    context_name: str,
+    *,
+    priority: int,
+) -> GripContext:
     consumer_ctx = parent_ctx.get_grip_consumer_context()
-    cache = cast(
-        dict[tuple[int, str, int], GripContext],
-        __pyrolyze_ctx.get_or_init_local("grip_pyrolyze.child_contexts", dict),
-    )
-    cache_key = (id(consumer_ctx), context_name, priority)
-    existing = cache.get(cache_key)
+    cache_key = (id(parent_ctx.get_grok()), id(consumer_ctx), context_name, priority)
+    existing = _NAMED_CHILD_CONTEXTS.get(cache_key)
     if existing is not None:
         return existing
 
     child = consumer_ctx.create_child(priority=priority)
-    cache[cache_key] = child
+    _NAMED_CHILD_CONTEXTS[cache_key] = child
     return child
 
 
@@ -115,7 +108,8 @@ def push_grip_context(
     func: Callable[..., None],
     **kwargs: Any,
 ) -> None:
-    next_ctx = use_grip_child_context(context_name)
+    __pyrolyze_ctx = cast(PlainCallRuntimeContext | None, kwargs.pop("__pyrolyze_ctx", None))
+    next_ctx = use_grip_child_context(context_name, __pyrolyze_ctx=cast(Any, __pyrolyze_ctx))
     with app_context_override[GRIP_LOCAL_CONTEXT](next_ctx):
         func(**kwargs)
 

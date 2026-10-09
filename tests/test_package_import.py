@@ -23,7 +23,7 @@ def test_define_grip_registers_on_default_registry() -> None:
 
     assert grip.name == "TestDefineGrip"
     assert grip.default == 42
-    assert GRIP_DEFAULT_REGISTRY._keys_by_name["TestDefineGrip"] is grip
+    assert GRIP_DEFAULT_REGISTRY.get_by_key(grip.key) is grip
 
 
 def test_session_defaults_follow_default_grok() -> None:
