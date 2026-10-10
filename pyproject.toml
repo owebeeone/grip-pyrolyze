@@ -21,6 +21,9 @@ dependencies = [
   "pyrolyze",
 ]
 
+[tool.uv]
+exclude-newer = "1 week"
+
 [tool.uv.sources]
 grip-py = { path = "../grip-py", editable = true }
 pyrolyze = { path = "../pyrolyze", editable = true }
